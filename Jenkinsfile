@@ -17,7 +17,7 @@ pipeline {
         GXServerKBVersion = 'development' // Defined in GXServer
         WorkingDirectory = "C:\\applications\\net_application" // Local path on Jenkins agent where KB will be downloaded
         WorkingVersion = 'development' // Local KB version
-        KBDBServerInstance = "AR-DEV-JNODE-3\\SQLEXPRESS" // Database server instance where KB database is located
+        KBDBServerInstance = "DB_SERVER_1\\SQLEXPRESS" // Database server instance where KB database is located
 
         /* Stage 'Build KB' */
 
