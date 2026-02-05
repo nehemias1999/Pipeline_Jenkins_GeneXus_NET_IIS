@@ -6,7 +6,7 @@ pipeline {
 
         /* Pipeline parms */
 
-        ForceRebuild = "${params['Realizar Rebuild']}" // Whether to force a rebuild of the KB
+        ForceRebuild = "${params['Force Rebuild']}" // Whether to force a rebuild of the KB
 
         /* Stage 'Update pending Commits' */
 
