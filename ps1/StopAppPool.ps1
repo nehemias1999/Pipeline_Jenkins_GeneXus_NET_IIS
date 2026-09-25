@@ -5,6 +5,7 @@
     Usa Invoke-Command con autenticacion Kerberos (evita downgrade a NTLM).
     Parametros obligatorios validados; cualquier error aborta con exit != 0
     para que Jenkins lo detecte via $LASTEXITCODE.
+    Purpose: detener el AppPool antes del deploy para evitar file locks.
 .NOTES
     Author: SDD implementer (REQ-002 pipeline-security)
     Usage: StopAppPool.ps1 -RemoteServerHost <host> -AppPoolName <pool>

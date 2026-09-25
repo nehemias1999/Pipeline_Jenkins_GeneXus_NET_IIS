@@ -1,0 +1,46 @@
+# ==============================================================================
+# Purpose: Ignorar artefactos locales de build/deploy para que nunca se
+#   commiteen (GeneXus outputs, ZIPs, backups, temporales Windows/Jenkins).
+# Description: .gitignore del pipeline GeneXus .NET sobre IIS (REQ-005).
+# Author: SDD implementer (REQ-005 pipeline-quality)
+# Usage: Automatico via `git status`; verificar con `git status --porcelain`
+#   tras generar un *.zip (no debe listarse).
+# Dependencies: git
+# ==============================================================================
+
+# --- GeneXus build outputs ---
+*.zip
+Backup-*.zip
+*.gxdproj.user
+*.suo
+*.user
+[Bb]in/
+[Oo]bj/
+[Dd]eploy/LOCAL/
+GxGerman/
+web/bin/
+
+# --- Backups locales ---
+*.bak
+*.tmp
+*.orig
+*~
+
+# --- Jenkins ---
+.jenkins/
+jenkins.war
+*.jpi
+*.hpi
+
+# --- Windows ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
