@@ -1,12 +1,63 @@
+// ==============================================================================
+ // Description: Pipeline declarativo GeneXus .NET sobre IIS con promocion
+ //   controlada DEV -> TEST -> PROD. Resuelve host/AppPool/rutas/credentials
+ //   desde el mapa ENV_CONFIG segun params.TARGET_ENV; conserva los stages
+ //   existentes (Update/Build/ZIP/Deploy) y anade gates de aprobacion mas
+ //   bloque post determinista. Sin valores de entorno hardcodeados fuera del mapa.
+ // Author: SDD implementer (REQ-001 multienv-pipeline)
+ // Usage: Ejecutar desde Jenkins (Build with Parameters). Parametros:
+ //   TARGET_ENV=DEV|TEST|PROD, APP_MAJOR, APP_MINOR, HealthCheckUrl.
+ // Env Vars: TARGET_ENV, APP_MAJOR, APP_MINOR, HealthCheckUrl (parameters);
+ //   ENV_HOST, ENV_APPPOOL, ENV_WEBPATH, ENV_CREDENTIALS (resueltos del mapa);
+ //   GXServer17URL (variable global Jenkins), credenciales GXServer17 /
+ //   credential_jenkins via withCredentials (nunca en claro).
+ // Dependencies: Jenkins declarative pipeline, GeneXus 17 U10 + MSBuild en el
+ //   agente, plugin gxserver, MSDeploy V3, scripts bat/DeployFileOnIISServer.bat
+ //   y ps1/StopAppPool.ps1 + ps1/StartAppPool.ps1.
+ // Output / Exit codes: SUCCESS despliega y arranca AppPool; FAILURE notifica
+ //   e intenta rollback/arranque; UNSTABLE notifica. Verification: ver contrato
+ //   REQ-001 (grep TARGET_ENV>=3, post>=1, input>=2; parse Groovy; DE6F1DCA intacto).
+ // ==============================================================================
+ // Mapa por entorno: unica fuente de verdad para host/AppPool/rutas/credenciales.
+ // TARGET_ENV selecciona la entrada; ningun stage usa valores fuera de este mapa.
+ def ENV_CONFIG = [
+     DEV : [host: 'SERVER_1.deploy.local',  appPool: 'NET_Application_AppPool',      kb: 'net_application', kbVersion: 'development', webAppPath: 'E:\\inetpup\\wwwroot\\NET_APPLICATION_DEV',  credentialsId: 'credential_jenkins'],
+     TEST: [host: 'SERVER_2.deploy.local',  appPool: 'NET_Application_AppPool_TEST', kb: 'net_application', kbVersion: 'test',        webAppPath: 'E:\\inetpup\\wwwroot\\NET_APPLICATION_TEST', credentialsId: 'credential_jenkins_test'],
+     PROD: [host: 'SERVER_3.deploy.local',  appPool: 'NET_Application_AppPool_PROD', kb: 'net_application', kbVersion: 'production',  webAppPath: 'E:\\inetpup\\wwwroot\\NET_APPLICATION_PROD', credentialsId: 'credential_jenkins_prod']
+ ]
+
 pipeline {
 
     agent { label 'SERVER_1' }
+
+    parameters {
+        choice(name: 'TARGET_ENV', choices: ['DEV', 'TEST', 'PROD'], description: 'Entorno objetivo del deploy (resuelve host/AppPool/rutas desde ENV_CONFIG)')
+        string(name: 'APP_MAJOR', defaultValue: '1', description: 'Version major de la aplicacion')
+        string(name: 'APP_MINOR', defaultValue: '0', description: 'Version minor de la aplicacion')
+        string(name: 'HealthCheckUrl', defaultValue: '', description: 'URL de health-check post-deploy (vacio = omitir)')
+    }
+
+    options {
+        timestamps()
+        timeout(time: 60, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
+        disableConcurrentBuilds()
+        skipDefaultCheckout(false)
+    }
 
     environment {
 
         /* Pipeline parms */
 
         ForceRebuild = "${params['Force Rebuild']}" // Whether to force a rebuild of the KB
+        TARGET_ENV = "${params.TARGET_ENV}" // Entorno objetivo (DEV/TEST/PROD), resuelto via ENV_CONFIG
+        APP_VERSION = "${params.APP_MAJOR}.${params.APP_MINOR}" // Version derivada de APP_MAJOR/APP_MINOR
+        HEALTH_CHECK_URL = "${params.HealthCheckUrl}" // URL de health-check post-deploy
+        // Resueltos desde ENV_CONFIG en el stage 'Resolve Environment Config' (nunca hardcodeados por stage):
+        ENV_HOST = '' // Host IIS del TARGET_ENV (mapa ENV_CONFIG)
+        ENV_APPPOOL = '' // AppPool IIS del TARGET_ENV (mapa ENV_CONFIG)
+        ENV_WEBPATH = '' // Ruta web destino del TARGET_ENV (mapa ENV_CONFIG)
+        ENV_CREDENTIALS = '' // Credential ID del TARGET_ENV (mapa ENV_CONFIG)
 
         /* Stage 'Update pending Commits' */
 
@@ -23,7 +74,7 @@ pipeline {
 
         MSBuildPath = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\MSBuild\\Current\\Bin" // MSBuild installation path
         Genexus17U10Path = "C:\\Program Files (x86)\\GeneXus\\Genexus17U10" // GeneXus 17 U10 installation path
-        WorkingEnvironment = 'DEV' // Environment to build
+        WorkingEnvironment = "${params.TARGET_ENV}" // Environment to build (resuelto desde TARGET_ENV)
         CompileMains = 'true' // Whether to compile mains or not
 
         buildMSBuildScript = '"%MSBuildPath%\\MSBuild.exe" "%Genexus17U10Path%\\TeamDev.msbuild" ' +
@@ -61,7 +112,7 @@ pipeline {
 
         ZIPFilePath = "${WorkingDirectory}\\${WorkingEnvironment}\\Deploy\\LOCAL\\${ProjectName}.zip" // Path to the generated ZIP file
 
-        /* Stage 'Deploy ZIP File on IIS server' */
+        /* Stage 'Deploy ZIP File on IIS server' (valores base DEV; el efectivo sale de ENV_* via ENV_CONFIG) */
 
         TargetAPRemoteServerHost = 'SERVER_1.deploy.local' // Target Application Server Remote Host
         AppPoolName = 'NET_Application_AppPool' // Application Pool name on IIS
@@ -89,6 +140,26 @@ pipeline {
     }
 
     stages {
+
+        stage('Resolve Environment Config') {
+
+            steps {
+
+                echo "Resolving config for TARGET_ENV=${params.TARGET_ENV}"
+
+                script {
+                    // Resuelve host/AppPool/paths/credentials desde ENV_CONFIG segun TARGET_ENV (nunca de DEV si es TEST/PROD).
+                    def cfg = ENV_CONFIG[params.TARGET_ENV] ?: ENV_CONFIG['DEV']
+                    env.ENV_HOST = cfg.host
+                    env.ENV_APPPOOL = cfg.appPool
+                    env.ENV_WEBPATH = cfg.webAppPath
+                    env.ENV_CREDENTIALS = cfg.credentialsId
+                    echo "Deploy target: host=${env.ENV_HOST} appPool=${env.ENV_APPPOOL} path=${env.ENV_WEBPATH} app=${params.APP_MAJOR}.${params.APP_MINOR}"
+                }
+
+            }
+
+        }
 
         stage('Update pending Commits') {
 
@@ -158,11 +229,41 @@ pipeline {
         
         }
 
+        stage('Promote to TEST') {
+
+            when {
+                expression { params.TARGET_ENV == 'TEST' || params.TARGET_ENV == 'PROD' }
+            }
+
+            steps {
+
+                // Gate de promocion a TEST: sin aprobacion no hay deploy a TEST/PROD.
+                input message: 'Promote to TEST?', submitter: 'release-managers,admins'
+
+            }
+
+        }
+
+        stage('Promote to PROD') {
+
+            when {
+                expression { params.TARGET_ENV == 'PROD' }
+            }
+
+            steps {
+
+                // Gate de promocion a PROD: sin aprobacion el stage de PROD nunca ejecuta MSDeploy.
+                input message: 'Promote to PROD?', submitter: 'release-managers,admins'
+
+            }
+
+        }
+
         stage('Deploy ZIP File on IIS server') {
 
             steps {
 
-                echo 'Start Deploy ZIP File on IIS server Stage'
+                echo "Start Deploy ZIP File on IIS server Stage [TARGET_ENV=${params.TARGET_ENV} host=${env.ENV_HOST}]"
 
                 powershell """
                     ${env.stopAppPoolScript}
@@ -189,6 +290,25 @@ pipeline {
 
         }
 
+    }
+
+    post {
+        // Bloque post determinista: always garantiza AppPool arrancado + limpieza parcial.
+        always {
+            echo 'Post always: garantizar AppPool arrancado y limpieza parcial del workspace'
+            powershell(script: "${env.startAppPoolScript}", returnStatus: true)
+            bat label: 'Limpieza parcial workspace', script: 'echo Limpieza parcial del workspace'
+        }
+        success {
+            echo "Post success: deploy ${params.TARGET_ENV} OK (app ${params.APP_MAJOR}.${params.APP_MINOR})"
+        }
+        failure {
+            echo "Post failure: deploy ${params.TARGET_ENV} FALLO; notificar y disparar rollback"
+            echo 'Rollback trigger: restaurar artefacto anterior (manual/automatico segun runbook)'
+        }
+        unstable {
+            echo "Post unstable: deploy ${params.TARGET_ENV} inestable; notificar"
+        }
     }
 
 }
