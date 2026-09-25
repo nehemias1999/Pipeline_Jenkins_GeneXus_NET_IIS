@@ -16,7 +16,9 @@
  //   y ps1/StopAppPool.ps1 + ps1/StartAppPool.ps1.
  // Output / Exit codes: SUCCESS despliega y arranca AppPool; FAILURE notifica
  //   e intenta rollback/arranque; UNSTABLE notifica. Verification: ver contrato
- //   REQ-001 (grep TARGET_ENV>=3, post>=1, input>=2; parse Groovy; DE6F1DCA intacto).
+  //   REQ-001 (grep TARGET_ENV>=3, post>=1, input>=2; parse Groovy).
+  //   REQ-002: sin secretos literales; ApplicationKey vive en la credential
+  //   'genexus-app-key' (secret text) inyectada via withCredentials (nunca en claro).
  // ==============================================================================
  // Mapa por entorno: unica fuente de verdad para host/AppPool/rutas/credenciales.
  // TARGET_ENV selecciona la entrada; ningun stage usa valores fuera de este mapa.
@@ -90,7 +92,9 @@ pipeline {
 
         /* Stage 'Create ZIP File' */
 
-        ApplicationKey = 'DE6F1DCAD523A253749128F1AA89BED04B65785142228A3927E37C37D8325AA9' // Application Key of the KB
+        // REQ-002: ApplicationKey eliminado del repo; vive en la credential
+        // 'genexus-app-key' (secret text), inyectada como GX_APP_KEY solo en el
+        // stage 'Create ZIP File' via withCredentials (nunca en claro ni en logs).
         ProjectName = 'NET_APPLICATION_DEV' // Project name
         Timestamp = 'NET_APPLICATION_DEV' // Timestamp for the deployment
         DeploymentUnit = 'NET_APPLICATION_DU' // Deployment Unit name
@@ -98,9 +102,9 @@ pipeline {
 
         createDeployMsBuildScript = '"%MSBuildPath%\\MSBuild.exe" "%Genexus17U10Path%\\Deploy.msbuild" ' +
                                     '/p:KBPath="%WorkingDirectory%" ' +
-                                    '/p:KBVersion="%WorkingVersion%" ' +
+                                    '/p:KBVersion="%WorkingVersion%" ' + 
                                     '/p:KBEnvironment="%WorkingEnvironment%" ' + 
-                                    '/p:Application_Key="%ApplicationKey%" ' + 
+                                    '/p:Application_Key="%GX_APP_KEY%" ' +
                                     '/p:ProjectName="%ProjectName%" ' +
                                     '/p:TimeStamp="%Timestamp%" ' +
                                     '/p:DeploymentUnit="%DeploymentUnit%" ' +
@@ -125,13 +129,14 @@ pipeline {
         DestinationWebAppPath = "E:\\inetpup\\wwwroot\\${ProjectName}" // Destination web application path on IIS server
         JenkinsCredentialsId = 'credential_jenkins' // Jenkins Credentials ID for accessing the IIS server
 
+        // REQ-002: BAT de 5 args; el password viaja por env MSDEPLOY_PASSWORD
+        // (inyectada por withCredentials), nunca en argv (visible en ps/list).
         deployZIPFileOnIISServerScript = '"bat\\DeployFileOnIISServer.bat" ' +
                                          '"%MSDeployEXEPath%" ' +  
                                          '"%ZIPFilePath%" ' +
                                          '"%DestinationWebAppPath%" ' + 
                                          '"%TargetAPRemoteServerHost%" ' +           
-                                         '"%JenkinsUserName%" ' +
-                                         '"%JenkinsPassword%"'
+                                         '"%JenkinsUserName%"'
 
         startAppPoolScript = '& "ps1\\StartAppPool.ps1" ' +
                              "-RemoteServerHost ${TargetAPRemoteServerHost} " +
@@ -215,11 +220,14 @@ pipeline {
             
                 script {
             
-                    bat label: "Create Deploy MSBuild Script",
-                	script: "${env.createDeployMsBuildScript}"
+                    // REQ-002: GX_APP_KEY solo existe dentro de este bloque (secret text 'genexus-app-key').
+                    withCredentials([string(credentialsId: 'genexus-app-key', variable: 'GX_APP_KEY')]) {
+                        bat label: "Create Deploy MSBuild Script",
+                    	script: "${env.createDeployMsBuildScript}"
 
-                    bat label: "Create ZIP File MSBuild Script",
-                    script: "${env.createZIPFileMSBuildScript}"
+                        bat label: "Create ZIP File MSBuild Script",
+                        script: "${env.createZIPFileMSBuildScript}"
+                    }
 
                 }
 
@@ -271,10 +279,13 @@ pipeline {
 
                 script {
 
-                    withCredentials([usernamePassword(credentialsId: "${env.JenkinsCredentialsId}", usernameVariable: 'JenkinsUserName', passwordVariable: 'JenkinsPassword')]) {
-
-                        bat label: 'Deploy ZIP File on IIS server Script', 
-                        script: "${env.deployZIPFileOnIISServerScript}"
+                    // REQ-002: password via env MSDEPLOY_PASSWORD (nunca en argv);
+                    // withCredentials + maskPasswords enmascaran '****' en consola.
+                    withCredentials([usernamePassword(credentialsId: "${env.JenkinsCredentialsId}", usernameVariable: 'JenkinsUserName', passwordVariable: 'MSDEPLOY_PASSWORD')]) {
+                        maskPasswords(varMaskRegexes: [[regex: '(?i)password\\s*[=:]\\s*\\S+']]) {
+                            bat label: 'Deploy ZIP File on IIS server Script', 
+                            script: "${env.deployZIPFileOnIISServerScript}"
+                        }
 
                     }
 
