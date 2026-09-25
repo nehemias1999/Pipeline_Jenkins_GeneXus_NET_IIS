@@ -1,74 +1,75 @@
-# Jenkins Pipeline – GeneXus .NET Application Deployment to IIS
+# Pipeline_Jenkins_GeneXus_NET_IIS
 
-## Overview
+Pipeline declarativo Jenkins para desplegar la aplicacion GeneXus .NET sobre IIS remoto con promocion controlada DEV -> TEST -> PROD.
 
-This project implements a **CI/CD pipeline using Jenkins** to deploy a **GeneXus-generated .NET application** to a **remote IIS server**.
+## Background
 
-The pipeline automates the deployment of a packaged GeneXus application (`.zip`) to IIS using **MSDeploy**, and controls the **IIS Application Pool lifecycle** (stop/start) through remote PowerShell execution.
+Automatiza el ciclo completo GeneXus 17 U10 + MSBuild + MSDeploy + WinRM: sincroniza la KB desde GXServer, compila, genera el ZIP de deploy, respalda el sitio remoto, despliega con stop/start del AppPool (rollback automatico) y verifica con health-check. Fuente de verdad de requirements: `openspec/`.
 
-The objective of this pipeline is to provide a **reliable, repeatable, and automated deployment process** for GeneXus .NET applications in Windows environments.
+### Tecnologias
 
----
+Jenkins (declarative), GeneXus 17 U10, MSBuild 2019, MSDeploy V3, IIS, PowerShell/WinRM, Batch.
 
-## High-Level Workflow
+### Flujo (5 stages reales)
 
-1. Jenkins executes the pipeline defined in the `Jenkinsfile`.
-2. The target IIS Application Pool is stopped on the remote server.
-3. The application package is deployed to IIS using MSDeploy.
-4. The IIS Application Pool is started again.
-5. The pipeline reports success or failure.
+1. **Update Commits** — sincroniza la KB (`gxserver changelog/poll`) al workspace del agente.
+2. **Build KB** — compila con `TeamDev.msbuild` (credenciales `GXServer17` via `withCredentials`).
+3. **Create ZIP** — genera el deploy con `Deploy.msbuild` (ApplicationKey desde `genexus-app-key`) y archiva `**/*.zip` con fingerprint + SHA256 en log.
+4. **Backup+Deploy** — `Backup Current Site` genera `Backup-<APP_VERSION>.zip` (retencion 5) y `Deploy ZIP File on IIS server` ejecuta stop -> sync -> start con rollback auto (`ROLLBACK_OK`/`ROLLBACK_FAILED`); gates `Promote to TEST` / `Promote to PROD` (`input`) protegen TEST/PROD; `Tag Release` crea el tag `v<version>` en `main`.
+5. **Verify** — `Verify Deploy (HealthCheck)` hace GET a `HealthCheckUrl` (3 intentos x 15 s, timeout 10 s; solo 2xx es SUCCESS) y restaura el Backup si falla; `post.always` re-arranca el AppPool.
 
----
+## Matriz DEV/TEST/PROD
 
-## Technologies Used
+`TARGET_ENV` selecciona la entrada de `ENV_CONFIG` (unica fuente de verdad; ningun stage hardcodea entorno):
 
-- Jenkins – CI/CD automation and orchestration
-- GeneXus – Low-code platform generating the .NET application
-- .NET Framework / .NET – Application runtime
-- Microsoft IIS – Web server hosting the application
-- MSDeploy (Web Deploy) – Deployment tool for IIS
-- PowerShell – Remote server management and App Pool control
-- Batch scripting (.bat) – Deployment command execution
-- WinRM / PowerShell Remoting – Remote execution on IIS server
+| TARGET_ENV | Host | AppPool | WebPath | credentialsId |
+|---|---|---|---|---|
+| DEV | SERVER_1.deploy.local | NET_Application_AppPool | E:\inetpup\wwwroot\NET_APPLICATION_DEV | credential_jenkins |
+| TEST | SERVER_2.deploy.local | NET_Application_AppPool_TEST | E:\inetpup\wwwroot\NET_APPLICATION_TEST | credential_jenkins_test |
+| PROD | SERVER_3.deploy.local | NET_Application_AppPool_PROD | E:\inetpup\wwwroot\NET_APPLICATION_PROD | credential_jenkins_prod |
 
----
+## Install
 
-## Project Structure
+Prerrequisitos: agente Windows con GeneXus 17 U10, MSBuild 2019, MSDeploy V3, plugin `gxserver`, WinRM habilitado en los IIS destino, variable global `GXServer17URL`.
 
+Crear en Jenkins > Credentials estas 3+ credenciales antes de correr:
+
+- `GXServer17` (username/password) — acceso a GXServer.
+- `genexus-app-key` (secret text) — ApplicationKey GeneXus, inyectada como `GX_APP_KEY` solo en el stage Create ZIP.
+- `credential_jenkins` (+ `credential_jenkins_test`, `credential_jenkins_prod` para la matriz) (username/password) — acceso MSDeploy/WinRM al IIS destino; el password viaja por env `MSDEPLOY_PASSWORD`, nunca en argv.
+- `git-credentials` (username/password) — push del tag `v<APP_VERSION>` en `main` (stage Tag Release, idempotente).
+
+## Usage
+
+Happy path (solo con este README): crear las credenciales de arriba, luego Jenkins > Build with Parameters: `TARGET_ENV=DEV`, `APP_MAJOR=1`, `APP_MINOR=0`, `HealthCheckUrl=https://dev.ejemplo/health`. Para TEST/PROD aprobar los gates `Promote to TEST` / `Promote to PROD` (submitters `release-managers,admins`).
+
+## Contributing
+
+Verificacion sin Jenkins (REQ-005):
+
+```powershell
+# PS1: cero errores
+Invoke-ScriptAnalyzer -Path ps1 -Severity Error
+# ZIP ignorado por git (no debe listarse)
+git status --porcelain
 ```
-Pipeline_Jenkins_GeneXus_NET_IIS/
-├── Jenkinsfile
-├── bat/
-│   └── DeployFileOnIISServer.bat
-├── ps1/
-│   ├── StartAppPool.ps1
-│   └── StopAppPool.ps1
-└── README.md
+
+```bat
+REM BAT: chequeo de sintaxis documentado (cmd /c exit code 0)
+cmd /c bat\DeployFileOnIISServer.bat
 ```
 
----
+```sh
+# Jenkinsfile: parse Groovy / declarative linter
+groovy Jenkinsfile
+# Headers code-doc-standard presentes
+grep -c Purpose Jenkinsfile bat/*.bat ps1/*.ps1
+# Spec valida
+openspec validate --strict
+```
 
-## Pipeline Steps
+Convencion de commits: Conventional Commits (`feat:`, `fix:`).
 
-### 1. Stop IIS Application Pool
-Stops the IIS Application Pool on the remote server before deployment to prevent file locks.
+## License
 
-### 2. Deploy Application Package to IIS
-Deploys the GeneXus-generated ZIP package using MSDeploy.
-
-### 3. Start IIS Application Pool
-Starts the IIS Application Pool after deployment.
-
----
-
-## Security Considerations
-
-- Manage credentials using Jenkins Credentials
-- Secure PowerShell Remoting access
-- Restrict MSDeploy permissions
-
----
-
-## Conclusion
-
-This pipeline provides a robust Jenkins-based deployment solution for GeneXus .NET applications on IIS.
+Uso interno del equipo de despliegue; sin licencia publica declarada.

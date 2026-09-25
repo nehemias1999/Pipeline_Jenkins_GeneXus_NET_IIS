@@ -1,4 +1,5 @@
 // ==============================================================================
+ // Purpose: Pipeline declarativo GeneXus .NET sobre IIS con promocion
  // Description: Pipeline declarativo GeneXus .NET sobre IIS con promocion
  //   controlada DEV -> TEST -> PROD. Resuelve host/AppPool/rutas/credentials
  //   desde el mapa ENV_CONFIG segun params.TARGET_ENV; conserva los stages

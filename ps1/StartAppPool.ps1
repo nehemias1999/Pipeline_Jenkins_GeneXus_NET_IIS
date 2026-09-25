@@ -5,6 +5,7 @@
     Usa Invoke-Command con autenticacion Kerberos (evita downgrade a NTLM).
     Parametros obligatorios validados; cualquier error aborta con exit != 0
     para que Jenkins lo detecte via $LASTEXITCODE.
+    Purpose: arrancar el AppPool tras el deploy (o tras rollback/fallo).
 .NOTES
     Author: SDD implementer (REQ-002 pipeline-security)
     Usage: StartAppPool.ps1 -RemoteServerHost <host> -AppPoolName <pool>

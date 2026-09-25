@@ -2,6 +2,7 @@
 setlocal
 
 REM ==============================================================================
+REM Purpose: Despliega un paquete ZIP en IIS via MSDeploy (verb:sync).
 REM Description: Despliega un paquete ZIP en IIS via MSDeploy (verb:sync).
 REM   No recibe el password por argv; lo lee de la variable de entorno
 REM   MSDEPLOY_PASSWORD (inyectada por Jenkins withCredentials). Aborta con
