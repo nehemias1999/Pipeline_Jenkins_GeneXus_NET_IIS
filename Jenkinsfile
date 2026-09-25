@@ -23,6 +23,12 @@
   //   (currentBuild.description/displayName); stage Tag Release crea/pushea tag
   //   git v<version> solo en main/SUCCESS idempotente (credential git-credentials);
   //   stage Create ZIP archiva ZIP con fingerprint y registra SHA256 en el log.
+  //   REQ-004: stage Backup genera Backup-<APP_VERSION>.zip via msdeploy
+  //   contentPath->package con retencion de 5; stage Deploy usa try/finally
+  //   stop->deploy->start con rollback auto (ROLLBACK_OK/FAILED) en
+  //   catch/post.failure; stage Verify hace GET HealthCheckUrl con
+  //   Invoke-WebRequest retry 3x15s (timeout 10s, solo 2xx es SUCCESS);
+  //   post.always re-arranca el AppPool en todo camino (incluido abort).
  // ==============================================================================
  // Mapa por entorno: unica fuente de verdad para host/AppPool/rutas/credenciales.
  // TARGET_ENV selecciona la entrada; ningun stage usa valores fuera de este mapa.
@@ -302,35 +308,121 @@ pipeline {
 
         }
 
+        stage('Backup Current Site') {
+
+            steps {
+
+                echo "Start Backup Current Site Stage [APP_VERSION=${env.APP_VERSION}]"
+
+                script {
+                    // REQ-004/diseno 5: Backup versionado del contentPath remoto
+                    // con la misma herramienta (msdeploy contentPath->package);
+                    // existe antes del sync para que el rollback tenga de donde restaurar.
+                    withCredentials([usernamePassword(credentialsId: "${env.JenkinsCredentialsId}", usernameVariable: 'JenkinsUserName', passwordVariable: 'MSDEPLOY_PASSWORD')]) {
+                        bat label: 'Backup contentPath remoto',
+                        script: '"%MSDeployEXEPath%\\msdeploy" -verb:sync -source:contentPath="%DestinationWebAppPath%" -dest:package="Backup-%APP_VERSION%.zip" -enableRule:DoNotDeleteRule'
+                    }
+                    // REQ-004/diseno 5: retencion de los ultimos 5 backups.
+                    powershell label: 'Retencion ultimos 5 backups',
+                        script: 'Get-ChildItem -Filter "Backup-*.zip" | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 | Remove-Item -Force'
+                    echo "Backup Backup-${env.APP_VERSION}.zip listo (retencion 5)"
+                }
+
+                // REQ-004: backup archivado para rollback manual si hiciera falta.
+                archiveArtifacts(artifacts: 'Backup-*.zip', fingerprint: true, onlyIfSuccessful: false)
+
+                echo 'End Backup Current Site Stage'
+
+            }
+
+        }
+
         stage('Deploy ZIP File on IIS server') {
 
             steps {
 
                 echo "Start Deploy ZIP File on IIS server Stage [TARGET_ENV=${params.TARGET_ENV} host=${env.ENV_HOST}]"
 
-                powershell """
-                    ${env.stopAppPoolScript}
-                """
-
                 script {
-
-                    // REQ-002: password via env MSDEPLOY_PASSWORD (nunca en argv);
-                    // withCredentials + maskPasswords enmascaran '****' en consola.
-                    withCredentials([usernamePassword(credentialsId: "${env.JenkinsCredentialsId}", usernameVariable: 'JenkinsUserName', passwordVariable: 'MSDEPLOY_PASSWORD')]) {
-                        maskPasswords(varMaskRegexes: [[regex: '(?i)password\\s*[=:]\\s*\\S+']]) {
-                            bat label: 'Deploy ZIP File on IIS server Script', 
-                            script: "${env.deployZIPFileOnIISServerScript}"
+                    // REQ-004: flujo stop->deploy->start con try/finally para que el
+                    // AppPool nunca quede detenido; catch con rollback auto al Backup.
+                    powershell """
+                        ${env.stopAppPoolScript}
+                    """
+                    try {
+                        // REQ-002: password via env MSDEPLOY_PASSWORD (nunca en argv);
+                        // withCredentials + maskPasswords enmascaran '****' en consola.
+                        withCredentials([usernamePassword(credentialsId: "${env.JenkinsCredentialsId}", usernameVariable: 'JenkinsUserName', passwordVariable: 'MSDEPLOY_PASSWORD')]) {
+                            maskPasswords(varMaskRegexes: [[regex: '(?i)password\\s*[=:]\\s*\\S+']]) {
+                                bat label: 'Deploy ZIP File on IIS server Script',
+                                script: "${env.deployZIPFileOnIISServerScript}"
+                            }
                         }
-
+                    } catch (err) {
+                        // REQ-004: rollback auto re-sincroniza el Backup y re-arranca
+                        // el AppPool; causa ROLLBACK_OK o ROLLBACK_FAILED en el log.
+                        try {
+                            withCredentials([usernamePassword(credentialsId: "${env.JenkinsCredentialsId}", usernameVariable: 'JenkinsUserName', passwordVariable: 'MSDEPLOY_PASSWORD')]) {
+                                bat label: 'Rollback desde Backup',
+                                script: '"%MSDeployEXEPath%\\msdeploy" -verb:sync -source:package="Backup-%APP_VERSION%.zip" -dest:contentPath="%DestinationWebAppPath%"'
+                            }
+                            powershell(script: "${env.startAppPoolScript}", returnStatus: true)
+                            echo "ROLLBACK_OK: deploy revertido al Backup-${env.APP_VERSION}.zip (${err})"
+                        } catch (rbErr) {
+                            echo "ROLLBACK_FAILED: no se pudo restaurar el Backup (${rbErr}); causa original: ${err}"
+                        }
+                        error("Deploy FAILED (rollback intentado): ${err}")
+                    } finally {
+                        powershell(script: "${env.startAppPoolScript}", returnStatus: true)
                     }
-
                 }
 
-                powershell """
-                    ${env.startAppPoolScript}
-                """
-
                 echo 'End Deploy ZIP File on IIS server Stage'
+
+            }
+
+        }
+
+        stage('Verify Deploy (HealthCheck)') {
+
+            when { expression { return params.HealthCheckUrl?.trim() } }
+
+            steps {
+
+                echo "Start Verify Deploy Stage [HealthCheckUrl=${params.HealthCheckUrl}]"
+
+                script {
+                    // REQ-004/diseno 6: GET HealthCheckUrl hasta 3 intentos (15s entre
+                    // ellos, timeout 10s); solo 2xx es SUCCESS. Sin plugin extra.
+                    def ok = false
+                    for (int i = 1; i <= 3 && !ok; i++) {
+                        def rc = powershell(returnStatus: true, label: "HealthCheck intento ${i}/3",
+                            script: "try { Invoke-WebRequest -Uri '${params.HealthCheckUrl}' -TimeoutSec 10 -UseBasicParsing | ForEach-Object { if ($_.StatusCode -ge 200 -and $_.StatusCode -lt 300) { exit 0 } else { exit 1 } } } catch { exit 1 }")
+                        if (rc == 0) {
+                            ok = true
+                            echo "HealthCheck OK en intento ${i}/3"
+                        } else if (i < 3) {
+                            echo "HealthCheck intento ${i}/3 fallo; reintento en 15s"
+                            sleep(time: 15, unit: 'SECONDS')
+                        }
+                    }
+                    if (!ok) {
+                        // REQ-004: fallo de health dispara restore del Backup.
+                        try {
+                            withCredentials([usernamePassword(credentialsId: "${env.JenkinsCredentialsId}", usernameVariable: 'JenkinsUserName', passwordVariable: 'MSDEPLOY_PASSWORD')]) {
+                                bat label: 'Rollback por HealthCheck',
+                                script: '"%MSDeployEXEPath%\\msdeploy" -verb:sync -source:package="Backup-%APP_VERSION%.zip" -dest:contentPath="%DestinationWebAppPath%"'
+                            }
+                            powershell(script: "${env.startAppPoolScript}", returnStatus: true)
+                            echo "ROLLBACK_OK: HealthCheck fallo 3 veces; Backup-${env.APP_VERSION}.zip restaurado"
+                        } catch (rbErr) {
+                            echo "ROLLBACK_FAILED: HealthCheck fallo y el restore fallo (${rbErr})"
+                        }
+                        error('HealthCheck FAILED tras 3 intentos (rollback intentado)')
+                    }
+                }
+
+                echo 'End Verify Deploy Stage'
 
             }
 
@@ -376,7 +468,7 @@ pipeline {
         }
         failure {
             echo "Post failure: deploy ${params.TARGET_ENV} FALLO; notificar y disparar rollback"
-            echo 'Rollback trigger: restaurar artefacto anterior (manual/automatico segun runbook)'
+            echo 'ROLLBACK_FAILED o ROLLBACK_OK segun restore en catch del stage Deploy/Verify (ver log)'
         }
         unstable {
             echo "Post unstable: deploy ${params.TARGET_ENV} inestable; notificar"
