@@ -14,11 +14,15 @@
  // Dependencies: Jenkins declarative pipeline, GeneXus 17 U10 + MSBuild en el
  //   agente, plugin gxserver, MSDeploy V3, scripts bat/DeployFileOnIISServer.bat
  //   y ps1/StopAppPool.ps1 + ps1/StartAppPool.ps1.
- // Output / Exit codes: SUCCESS despliega y arranca AppPool; FAILURE notifica
- //   e intenta rollback/arranque; UNSTABLE notifica. Verification: ver contrato
+  // Output / Exit codes: SUCCESS despliega y arranca AppPool; FAILURE notifica
+  //   e intenta rollback/arranque; UNSTABLE notifica. Verification: ver contrato
   //   REQ-001 (grep TARGET_ENV>=3, post>=1, input>=2; parse Groovy).
   //   REQ-002: sin secretos literales; ApplicationKey vive en la credential
   //   'genexus-app-key' (secret text) inyectada via withCredentials (nunca en claro).
+  //   REQ-003: stage Init computa APP_VERSION=<major>.<minor>.<BUILD_NUMBER>+<sha7>
+  //   (currentBuild.description/displayName); stage Tag Release crea/pushea tag
+  //   git v<version> solo en main/SUCCESS idempotente (credential git-credentials);
+  //   stage Create ZIP archiva ZIP con fingerprint y registra SHA256 en el log.
  // ==============================================================================
  // Mapa por entorno: unica fuente de verdad para host/AppPool/rutas/credenciales.
  // TARGET_ENV selecciona la entrada; ningun stage usa valores fuera de este mapa.
@@ -146,6 +150,29 @@ pipeline {
 
     stages {
 
+        stage('Init') {
+
+            steps {
+
+                echo 'Start Init Stage (versionado trazable REQ-003)'
+
+                script {
+                    // REQ-003: APP_VERSION=<major>.<minor>.<BUILD_NUMBER>+<sha7>;
+                    // expone version auditable (codigo<->artefacto<->deploy) en
+                    // env + currentBuild.description/displayName.
+                    def shortSha = bat(returnStdout: true, script: '@git rev-parse --short=7 HEAD').trim().readLines().last().trim()
+                    env.APP_VERSION = "${params.APP_MAJOR}.${params.APP_MINOR}.${env.BUILD_NUMBER}+${shortSha}"
+                    currentBuild.description = "v${env.APP_VERSION}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} v${env.APP_VERSION}"
+                    echo "APP_VERSION=${env.APP_VERSION} (build #${env.BUILD_NUMBER}, sha ${shortSha})"
+                }
+
+                echo 'End Init Stage'
+
+            }
+
+        }
+
         stage('Resolve Environment Config') {
 
             steps {
@@ -229,9 +256,17 @@ pipeline {
                         script: "${env.createZIPFileMSBuildScript}"
                     }
 
+                    // REQ-003: registra SHA256 del ZIP en el log (trazabilidad
+                    // codigo<->artefacto; equivalente a `sha256sum` en Linux).
+                    powershell label: 'Log SHA256 del artefacto',
+                        script: 'Get-ChildItem -Recurse -Filter *.zip | ForEach-Object { $h = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower(); Write-Output ("SHA256 " + $h + "  " + $_.FullName) }'
+
                 }
 
-                echo 'End Create ZIP File Stage'
+                // REQ-003: artefacto descargable desde Jenkins con fingerprint consultable.
+                archiveArtifacts(artifacts: '**/*.zip', fingerprint: true, onlyIfSuccessful: false)
+
+                echo "End Create ZIP File Stage [APP_VERSION=${env.APP_VERSION}]"
             
             }
         
@@ -296,6 +331,32 @@ pipeline {
                 """
 
                 echo 'End Deploy ZIP File on IIS server Stage'
+
+            }
+
+        }
+
+        stage('Tag Release') {
+
+            when { branch 'main' }
+
+            steps {
+
+                echo "Start Tag Release Stage [APP_VERSION=${env.APP_VERSION}]"
+
+                script {
+                    // REQ-003/diseno 7: tag git v<APP_VERSION> solo en main;
+                    // idempotente (si el tag ya existe el push se omite, el
+                    // build no falla); credential 'git-credentials' nunca en claro.
+                    def originUrl = bat(returnStdout: true, script: '@git config --get remote.origin.url').trim().readLines().last().trim()
+                    def pushPath = originUrl.replaceFirst(/^https?:\/\//, '')
+                    withCredentials([usernamePassword(credentialsId: 'git-credentials', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
+                        bat label: 'Tag git idempotente',
+                        script: "@echo off\r\ngit tag -l \"v%APP_VERSION%\" | findstr /C:\"v%APP_VERSION%\" >nul && echo Tag v%APP_VERSION% ya existe; se omite el push. || (git tag -a \"v%APP_VERSION%\" -m \"Release v%APP_VERSION% build #%BUILD_NUMBER%\" && git push https://%GIT_USER%:%GIT_PASS%@${pushPath} \"v%APP_VERSION%\")"
+                    }
+                }
+
+                echo "End Tag Release Stage [v${env.APP_VERSION}]"
 
             }
 
